@@ -52,6 +52,30 @@ class MLP(nn.Module):
         h=self.fc2(h)
         return h
 
+class SwiGLU(nn.Module):
+    def __init__(self,d_model,resid_std):
+        super(SwiGLU,self).__init__()
+        hidden=8*d_model//3
+        self.fc1=nn.Linear(d_model,hidden)
+        self.fc3=nn.Linear(d_model,hidden)
+        self.silu=nn.SiLU()
+        self.fc2=nn.Linear(hidden,d_model)
+
+        nn.init.trunc_normal_(self.fc1.weight,std=0.02)
+        nn.init.trunc_normal_(self.fc3.weight,std=0.02)
+        nn.init.zeros_(self.fc1.bias)
+        nn.init.zeros_(self.fc3.bias)
+        nn.init.trunc_normal_(self.fc2.weight,std=resid_std)
+        nn.init.zeros_(self.fc2.bias)
+
+    def forward(self,x):
+        c_t=self.fc1(x)
+        c_t=self.silu(c_t)
+        g_t=self.fc3(x)
+        h=c_t*g_t
+        h=self.fc2(h)
+        return h
+
 
 def _make_norm(name,d_model):
     if name=='layer_norm':
