@@ -39,7 +39,7 @@ if __name__=="__main__":
     predictor.train()
     target_base.eval()
     loss_history=[]
-    num_epochs=100
+    num_epochs=40
     save_every=10
     total_steps=num_epochs*len(dataloader)
     step=0
@@ -49,6 +49,7 @@ if __name__=="__main__":
             B,C=mask_block(8,4,rng)
             C_t=torch.tensor(C,device=device)
             B_t=[torch.tensor(b,device=device) for b in B]
+
             with torch.no_grad():
                 s_y=target_base(x)
             s_c=online_base(x,C_t)
@@ -67,8 +68,8 @@ if __name__=="__main__":
                 tqdm.write(f"{step:5d}  loss {loss.item():.4f}  var {var:.4f}  rank {rank:6.1f}")
             step+=1
         if (epoch+1) % save_every == 0:
-            torch.save(online_base.state_dict(), f"./checkpoint/vit_on{epoch + 1}.pth")
-            torch.save(target_base.state_dict(), f"./checkpoint/vit_tgt{epoch + 1}.pth")
+            torch.save(online_base.state_dict(),f"./checkpoint/vit_on{epoch + 1}.pth")
+            torch.save(target_base.state_dict(),f"./checkpoint/vit_tgt{epoch + 1}.pth")
             tqdm.write(f"checkpoint saved · epoch {epoch + 1} · step {step}")
     torch.save(online_base.state_dict(), "./checkpoint/vit_on.pth")
     torch.save(target_base.state_dict(), "./checkpoint/vit_tgt.pth")

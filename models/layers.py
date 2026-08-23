@@ -81,7 +81,7 @@ def _make_norm(name,d_model):
     if name=='layer_norm':
         return nn.LayerNorm(d_model)
     if name=='rms_norm':
-        raise NotImplementedError('rms norm in progress')
+        return nn.RMSNorm(d_model)
     else:
         raise ValueError(name)
 
@@ -89,7 +89,7 @@ def _make_ffn(name,d_model,resid_std):
     if name=="gelu_mlp":
         return MLP(d_model,resid_std)
     if name=="swiglu":
-        raise NotImplementedError('swiglu in progress')
+        return SwiGLU(d_model,resid_std)
     else:
         raise ValueError(name)
 
