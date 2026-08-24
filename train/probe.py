@@ -40,8 +40,8 @@ def evaluate(encoder,classifier,test_loader,device):
 
 if __name__=="__main__":
     device="mps" if torch.backends.mps.is_available() else "cpu"
-    enc=VIT().to(device)
-    enc.load_state_dict(torch.load("./checkpoint/abl_b_on40.pth",map_location=device))
+    enc=VIT(norm_type="rms_norm",ffn_type="swiglu").to(device)
+    enc.load_state_dict(torch.load("./checkpoint/rms_swi_on40.pth",map_location=device))
     for p in enc.parameters():
         p.requires_grad=False
     enc.eval()

@@ -25,8 +25,8 @@ if __name__=="__main__":
     dataset=datasets.CIFAR10(root="./data",train=True,transform=transform,download=True)
     dataloader=DataLoader(dataset,batch_size=256,shuffle=True,num_workers=2,drop_last=True)
 
-    online_base=VIT().to(device)
-    predictor=Predictor().to(device)
+    online_base=VIT(norm_type="rms_norm",ffn_type="swiglu").to(device)
+    predictor=Predictor(norm_type="rms_norm",ffn_type="swiglu").to(device)
     target_base=build_target(online_base).to(device)
     rng=np.random.default_rng(42)
 
@@ -68,11 +68,11 @@ if __name__=="__main__":
                 tqdm.write(f"{step:5d}  loss {loss.item():.4f}  var {var:.4f}  rank {rank:6.1f}")
             step+=1
         if (epoch+1) % save_every == 0:
-            torch.save(online_base.state_dict(),f"./checkpoint/vit_on{epoch + 1}.pth")
-            torch.save(target_base.state_dict(),f"./checkpoint/vit_tgt{epoch + 1}.pth")
+            torch.save(online_base.state_dict(),f"./checkpoint/rms_swi_on{epoch+1}.pth")
+            torch.save(target_base.state_dict(),f"./checkpoint/rms_swi_tgt{epoch + 1}.pth")
             tqdm.write(f"checkpoint saved · epoch {epoch + 1} · step {step}")
-    torch.save(online_base.state_dict(), "./checkpoint/vit_on.pth")
-    torch.save(target_base.state_dict(), "./checkpoint/vit_tgt.pth")
+    torch.save(online_base.state_dict(), "./checkpoint/rms_swi_on.pth")
+    torch.save(target_base.state_dict(), "./checkpoint/rms_swi_tgt.pth")
     tqdm.write(f"final checkpoint saved · {step} steps")
-    with open(f"./checkpoint/loss_history.json", 'w') as f:
+    with open( "./checkpoint/loss_rms_swi.json", 'w') as f:
         json.dump(loss_history, f)
