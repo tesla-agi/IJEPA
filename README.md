@@ -1,43 +1,106 @@
-# JEPA World Model
+# I-JEPA
 
 I-JEPA implemented from scratch in PyTorch — no `timm`, no reference code — and
-evaluated against a matched BYOL baseline. Built toward replacing the CNN encoder
-in a DreamerV3 world model.
+evaluated against a matched BYOL baseline.
 
-## What this is
+## What it does
 
-I-JEPA learns image representations by hiding regions of an image and predicting
-**their representations**, not their pixels. There is no decoder anywhere in the
-loss. That removes the reconstruction tax — an encoder trained on pixels must
-represent sensor noise and texture, because MSE has no mechanism to discard
-anything — but it also makes collapse the global minimum of the objective, since
-a constant encoder scores exactly zero.
+Hide regions of an image; predict **their representations**, not their pixels.
+No decoder anywhere in the loss.
+
+That removes the reconstruction tax — a pixel-trained encoder must represent
+sensor noise and texture, because MSE has no mechanism to discard anything. But
+it also makes collapse the global minimum of the objective: a constant encoder
+scores exactly zero.
 
 Most of the architecture exists to prevent that. This repo measures whether each
 part is load-bearing.
 
 ## Architecture
- one image, 64 patches
-    ┌──────────────────┴──────────────────┐
-    19–34 context patches all 64 patches
-│ │
-f_θ context encoder f_θ̄ target encoder
-ViT, trains EMA copy, no gradient
-│ │
-│ index target block
-▼ │
-g_φ predictor LayerNorm
-narrow ViT (d=96, depth=2) stop-gradient
-input: context tokens │
-+ mask token + pos_embed[j] │
-│ │
-└──────── L2 in latent space ─────────┘
 
+```
+                          one image  (B, 3, 32, 32)
+                                    |
+                        patchify -> 64 patches (8x8 grid)
+                                    |
+                      +-------------+-------------+
+                      |      mask sampler         |
+                      |  4 target blocks B1..B4   |
+                      |  1 context block C_raw    |
+                      |  C = C_raw \ union(Bm)    |
+                      +-------------+-------------+
+                                    |
+              +---------------------+----------------------+
+              |                                            |
+        x[C]  ~19-34 patches                        x  all 64 patches
+              |                                            |
+              v                                            v
+      +---------------+                            +---------------+
+      |     f_theta   |  context encoder           |  f_theta_bar  |  target encoder
+      |  ViT d=192    |  depth 6, heads 3          |  ViT d=192    |  EMA copy
+      |   TRAINS      |  attn |C|x|C|              |   NO GRAD     |  attn 64x64
+      +-------+-------+                            +-------+-------+
+              |                                            |
+        s_C  (B, |C|, 192)                          s_y  (B, 64, 192)
+              |                                            |
+              |                                     index rows Bm
+              |                                            |
+              |                                      LayerNorm
+              |                                     stop-gradient
+              v                                            |
+      +-------------------------------+                     |
+      |        g_phi   predictor      |                     |
+      |   narrow ViT  d=96, depth 2   |                     |
+      |                               |                     |
+      |  in:  proj_in(s_C) + pos[C]   |                     |
+      |       mask_token + pos[Bm]    |                     |
+      |  concat -> blocks -> norm     |                     |
+      |  proj_out -> slice off ctx    |                     |
+      +---------------+---------------+                     |
+                      |                                     |
+                s_hat_m (B,|Bm|,192)                 t_m (B,|Bm|,192)
+                      |                                     |
+                      +--------- L2 in latent space --------+
+                                    |
+                    loss = mean over M blocks
+                                    |
+            backward -> theta, phi     theta_bar <- tau*theta_bar + (1-tau)*theta
+```
 
-The mask token carries **position and nothing else** — the predictor is told
-*where* to predict, never *what* is there. Swap that positional query for an
-action embedding and the same architecture becomes a world model. That is the
-seam this project is built toward.
+| | input | tokens | width | depth | gradient | kept |
+|---|---|---|---|---|---|---|
+| `f_θ` context | context patches | 19–34 | 192 | 6 | yes | **yes** |
+| `f_θ̄` target | all patches | 64 | 192 | 6 | no — EMA | for probing |
+| `g_φ` predictor | ctx + mask tokens | \|C\|+\|Bₘ\| | 96 | 2 | yes | discarded |
+
+### The query
+
+```
+mask_token_j  =  m  +  pos_pred[j]
+                 |           |
+    one learned  |           +-- which patch to predict
+    vector,      |
+    identical    +-- carries NO content
+    everywhere
+```
+
+Position is a query row's entire identity. The only route to an answer is
+attention over the context rows.
+
+### One training step
+
+```
+1  sample masks - ONE draw per batch, shared across all 256 images
+2  s_y = f_target(x)                no_grad, all 64 tokens
+3  t_m = LN(s_y[B_m]).detach()      per block
+4  s_C = f_online(x, C)             ONCE - the expensive pass
+5  for m in 1..4:
+       s_hat_m = g_phi(s_C, C, B_m) predictor runs 4x, encoders run once
+       loss += mean((s_hat_m - t_m)^2)
+6  loss /= 4;  backward;  opt.step()
+7  theta_bar <- tau*theta_bar + (1-tau)*theta    tau: 0.996 -> 1.0 linear
+8  log loss, latent variance, effective rank
+```
 
 ## Results
 
@@ -58,21 +121,18 @@ Full numbers in [`logs/results.md`](logs/results.md).
 | no EMA | 0.0252 | 0.0220 | 3.7 | 21.0 |
 | no target LayerNorm | 0.2425 | 0.9029 | 81.4 | 48.3 |
 
-Three findings worth stating plainly:
-
 **Stop-grad is a wall.** Remove it and the encoder becomes a constant function in
 under 50 steps, with loss reaching exactly 0.0000 — the value theory predicts for
-`f ≡ c`.
+a constant encoder.
 
 **EMA is not optional at this scale.** SimSiam showed stop-grad plus a predictor
 suffices. That mechanism is visible here — the run dives toward collapse by step
 200, then *bounces out* at step 600 with variance recovering to 0.985 — but it
-does not hold. It settles at rank 3.7 and probes at 21%. SimSiam's result does
-not transfer to masked latent prediction at this scale.
+does not hold. It settles at rank 3.7 and probes at 21%.
 
 **Effective rank is necessary, not sufficient.** Removing the target LayerNorm
-produced *lower loss and higher rank* than baseline, and a worse probe. Every
-monitor metric read green on a run that was measurably worse.
+gave *lower loss and higher rank* than baseline, and a worse probe. Every monitor
+metric read green on a run that was measurably worse.
 
 ### RMSNorm + SwiGLU, parameter-matched
 
@@ -84,34 +144,35 @@ the 100-epoch baseline in 40 epochs.
 
 ## Why the gap to BYOL
 
-Two identified causes, neither of which is undertraining — the probe-vs-epochs
-curve (51.3 / 55.9 / 57.6 at 40 / 70 / 100) decelerates clearly.
+Not undertraining — the probe-vs-epochs curve (51.3 / 55.9 / 57.6 at 40 / 70 /
+100) decelerates clearly. Two identified causes:
 
-**Mask shape degeneracy at 8×8.** Scale 0.15–0.20 of 64 patches gives 9.6–12.8;
-intersected with aspect ratio 0.75–1.5 and integer sides, only {3×3, 3×4, 4×3}
-are reachable. Only *position* varies. The paper's 14×14 grid admits far more.
+**Mask shape degeneracy at 8x8.** Scale 0.15–0.20 of 64 patches gives 9.6–12.8;
+intersected with aspect ratio 0.75–1.5 and integer sides, only 3x3, 3x4 and 4x3
+are reachable. Only *position* varies. The paper's 14x14 grid admits far more.
 
-**ViT data-hunger.** 50k images at 32×32 is precisely the regime where the ViT
+**ViT data-hunger.** 50k images at 32x32 is precisely the regime where the ViT
 paper found CNNs win. BYOL's ResNet gets locality and translation equivariance
 for free.
 
 ## Layout
 
+```
 models/
-layers.py Attention, MLP, SwiGLU, ViTBlock, norm/ffn dispatchers
-vit.py PatchEmbed, VIT
-masking.py multi-block sampler
-ema.py target encoder build, update, momentum schedule
-predictor.py narrow ViT with positional mask tokens
+  layers.py      Attention, MLP, SwiGLU, ViTBlock, norm/ffn dispatchers
+  vit.py         PatchEmbed, VIT
+  masking.py     multi-block sampler
+  ema.py         target encoder build, update, momentum schedule
+  predictor.py   narrow ViT with positional mask tokens
 train/
-ijepa.py pretraining loop
-loss.py L2 in latent space
-probe.py frozen linear probe
+  ijepa.py       pretraining loop
+  loss.py        L2 in latent space
+  probe.py       frozen linear probe
 utils/
-monitor.py latent variance + effective rank
+  monitor.py     latent variance + effective rank
 logs/
-results.md
-
+  results.md
+```
 
 ## Run
 
@@ -120,8 +181,8 @@ python -m train.ijepa     # pretrain
 python -m train.probe     # evaluate
 ```
 
-Config flags on `VIT` and `Predictor`: `norm_type` ∈ {`layer_norm`, `rms_norm`},
-`ffn_type` ∈ {`gelu_mlp`, `swiglu`}.
+Config flags on `VIT` and `Predictor`: `norm_type` in {`layer_norm`, `rms_norm`},
+`ffn_type` in {`gelu_mlp`, `swiglu`}.
 
 ## Status
 
@@ -139,10 +200,14 @@ I-JEPA is a **representation learner** in the BYOL family — stop-grad, EMA
 target, predictor asymmetry, no negatives. It has no actions and no time axis, so
 it is not a world model.
 
-In this project the encoder replaces DreamerV3's per-frame CNN. The RSSM
-continues to own state, dynamics, and actions. The question being tested is
-whether a *predictability-shaped* latent is a better substrate for planning than
-a *pixel-shaped* one.
+The next step in this project is to replace DreamerV3's per-frame CNN with this
+encoder. The RSSM continues to own state, dynamics, and actions. The question
+being tested is whether a *predictability-shaped* latent is a better substrate
+for planning than a *pixel-shaped* one.
+
+Note where the seam is: the predictor is conditioned on `pos_pred[j]` — a query
+saying *where* to predict. Replace that with an action embedding and the same
+architecture, loss, and anti-collapse machinery become a world model.
 
 ## References
 
@@ -150,5 +215,5 @@ a *pixel-shaped* one.
   Joint-Embedding Predictive Architecture*
 - Grill et al. 2020 — *Bootstrap Your Own Latent*
 - Chen & He 2021 — *Exploring Simple Siamese Representation Learning*
-- Dosovitskiy et al. 2021 — *An Image is Worth 16×16 Words*
+- Dosovitskiy et al. 2021 — *An Image is Worth 16x16 Words*
 - Hafner et al. 2023 — *Mastering Diverse Domains through World Models*
