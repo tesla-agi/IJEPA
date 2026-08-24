@@ -91,7 +91,7 @@ average pool so the probe comparison is like-for-like.
 
 ## Relation to BYOL
 
-![BYOL](logs/figures/byol.png)
+![BYOL](logs/byol.png)
 
 *Figure from Grill et al. 2020.*
 
